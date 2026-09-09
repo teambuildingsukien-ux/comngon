@@ -40,7 +40,7 @@ export async function GET(request: NextRequest) {
         // ===== PARALLEL QUERIES =====
         let empQuery = supabase
             .from('users')
-            .select('id, full_name, email, department, role, status, default_meal_status')
+            .select('id, full_name, email, department, role, status, default_meal_status, shift_id, shift')
             .eq('tenant_id', tenantId)
             .eq('status', 'active')
             .not('role', 'ilike', '%kitchen%')
@@ -54,6 +54,7 @@ export async function GET(request: NextRequest) {
             { data: employees },
             { data: ordersRaw },
             { data: guestMealsRaw },
+            { data: shiftsRaw },
         ] = await Promise.all([
             empQuery,
             supabase.from('orders')
@@ -65,6 +66,10 @@ export async function GET(request: NextRequest) {
                 .select('id, quantity, note, created_by, created_at')
                 .eq('date', dateParam)
                 .eq('tenant_id', tenantId),
+            supabase.from('shifts')
+                .select('id, name, start_time, end_time')
+                .eq('tenant_id', tenantId)
+                .eq('active', true),
         ]);
 
         if (!employees || employees.length === 0) {
@@ -101,11 +106,19 @@ export async function GET(request: NextRequest) {
             orderMap.set(o.user_id, { status: o.status, created_at: o.created_at, note: o.note });
         });
 
+        // Map shift lookup
+        const shiftMap = new Map<string, string>();
+        (shiftsRaw || []).forEach((s: any) => {
+            shiftMap.set(s.id, `${s.name} (${s.start_time?.slice(0, 5)} - ${s.end_time?.slice(0, 5)})`);
+        });
+
         // Build employee rows with effective status
         interface EmployeeRow {
             full_name: string;
             email: string;
             department: string;
+            shift_name: string;
+            shift_id?: string;
             status: string;
             statusLabel: string;
             order_time: string;
@@ -113,6 +126,7 @@ export async function GET(request: NextRequest) {
         }
 
         const rows: EmployeeRow[] = [];
+
         for (const emp of employees) {
             const order = orderMap.get(emp.id);
             const defaultStatus = getDefaultFromMap(userDefaultMap, emp.id);
@@ -123,10 +137,16 @@ export async function GET(request: NextRequest) {
 
             if (statusParam !== 'all' && effectiveStatus !== statusParam) continue;
 
+            const shiftDisplayName = (emp.shift_id && shiftMap.get(emp.shift_id))
+                || emp.shift
+                || 'Ca 1 (12:00 - 12:30)';
+
             rows.push({
                 full_name: emp.full_name,
                 email: emp.email,
                 department: emp.department || 'N/A',
+                shift_name: shiftDisplayName,
+                shift_id: emp.shift_id,
                 status: effectiveStatus,
                 statusLabel,
                 order_time: order?.created_at
@@ -246,8 +266,58 @@ export async function GET(request: NextRequest) {
             cell.border = { top: { style: 'medium', color: { argb: 'FFB24700' } }, bottom: { style: 'medium', color: { argb: 'FFB24700' } } };
         });
 
+        // ⭐ Sheet 1: Bảng tổng hợp theo Ca ăn (Shifts breakdown)
+        ws1.addRow([]);
+        ws1.addRow([]);
+        const shiftTitleRow = ws1.addRow(['BẢNG PHÂN BỔ SUẤT ĂN THEO CA ĂN TRƯA']);
+        shiftTitleRow.font = { name: 'Arial', size: 12, bold: true, color: { argb: 'FFB74B0C' } };
+
+        const shiftHeaderRow = ws1.addRow(['Ca ăn', 'Khoảng thời gian', 'Số người ăn', 'Tỷ lệ %', '', '', '']);
+        shiftHeaderRow.eachCell((cell, colNumber) => {
+            if (colNumber <= 4) Object.assign(cell, { style: HEADER_STYLE });
+        });
+        shiftHeaderRow.height = 25;
+
+        // Group orders by shift for users who are 'eating'
+        const shiftGroups = new Map<string, { name: string; time: string; count: number }>();
+        (shiftsRaw || []).forEach((s: any) => {
+            shiftGroups.set(s.id, {
+                name: s.name,
+                time: `${s.start_time?.slice(0, 5)} - ${s.end_time?.slice(0, 5)}`,
+                count: 0
+            });
+        });
+        const defaultShiftKey = 'default';
+        shiftGroups.set(defaultShiftKey, { name: 'Chưa phân ca / Khác', time: '12:00 - 13:00', count: 0 });
+
+        employees.forEach(emp => {
+            const order = orderMap.get(emp.id);
+            const status = order?.status || getDefaultFromMap(userDefaultMap, emp.id);
+            if (status === 'eating') {
+                const key = emp.shift_id && shiftGroups.has(emp.shift_id) ? emp.shift_id : defaultShiftKey;
+                shiftGroups.get(key)!.count++;
+            }
+        });
+
+        shiftGroups.forEach(sg => {
+            if (sg.count > 0 || sg.name !== 'Chưa phân ca / Khác') {
+                const shiftRate = eatingCount > 0 ? ((sg.count / eatingCount) * 100).toFixed(0) : '0';
+                const sRow = ws1.addRow([sg.name, sg.time, sg.count, `${shiftRate}%`]);
+                sRow.eachCell((cell, colNumber) => {
+                    if (colNumber <= 4) {
+                        cell.border = {
+                            top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+                            bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+                            left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+                            right: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+                        };
+                    }
+                });
+            }
+        });
+
         ws1.columns = [
-            { width: 22 }, { width: 10 }, { width: 10 }, { width: 10 }, { width: 10 }, { width: 14 }, { width: 30 }
+            { width: 22 }, { width: 18 }, { width: 12 }, { width: 12 }, { width: 10 }, { width: 14 }, { width: 30 }
         ];
         // ⭐ Freeze panes
         freezePanes(ws1, 0, 5);
@@ -257,7 +327,7 @@ export async function GET(request: NextRequest) {
         // ══════════════════════════════════
         const ws2 = wb.addWorksheet('Chi tiết NV');
 
-        const headerRow2 = ws2.addRow(['STT', 'Họ tên', 'Phòng ban', 'Trạng thái', 'Thời gian ĐK', 'Ghi chú']);
+        const headerRow2 = ws2.addRow(['STT', 'Họ tên', 'Phòng ban', 'Ca ăn', 'Trạng thái', 'Thời gian ĐK', 'Ghi chú']);
         headerRow2.eachCell(cell => { Object.assign(cell, { style: HEADER_STYLE }); });
         headerRow2.height = 28;
         // ⭐ Freeze panes
@@ -277,7 +347,7 @@ export async function GET(request: NextRequest) {
             // ⭐ #6: Subtotal khi đổi phòng ban
             if (currentDept && currentDept !== row.department) {
                 const subRow = ws2.addRow([
-                    '', `📊 ${currentDept}`, `${deptMembers} NV`,
+                    '', `📊 ${currentDept}`, `${deptMembers} NV`, '',
                     `Ăn: ${deptEat}`, `Nghỉ: ${deptSkip}`,
                     `Tỷ lệ: ${(deptEat + deptSkip) > 0 ? ((deptEat / (deptEat + deptSkip)) * 100).toFixed(0) : 0}%`
                 ]);
@@ -298,7 +368,7 @@ export async function GET(request: NextRequest) {
 
             sttCounter++;
             const dataRow = ws2.addRow([
-                sttCounter, row.full_name, row.department,
+                sttCounter, row.full_name, row.department, row.shift_name,
                 row.statusLabel, row.order_time, row.note
             ]);
 
@@ -312,7 +382,7 @@ export async function GET(request: NextRequest) {
                     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF9FAFB' } };
                 }
                 // Status column coloring
-                if (colNumber === 4) {
+                if (colNumber === 5) {
                     const color = row.status === 'eating' ? STATUS_COLORS.eating
                         : row.status === 'not_eating' ? STATUS_COLORS.not_eating
                             : STATUS_COLORS.cancelled;
@@ -324,7 +394,7 @@ export async function GET(request: NextRequest) {
         // ⭐ Final department subtotal
         if (currentDept && deptMembers > 0) {
             const subRow = ws2.addRow([
-                '', `📊 ${currentDept}`, `${deptMembers} NV`,
+                '', `📊 ${currentDept}`, `${deptMembers} NV`, '',
                 `Ăn: ${deptEat}`, `Nghỉ: ${deptSkip}`,
                 `Tỷ lệ: ${(deptEat + deptSkip) > 0 ? ((deptEat / (deptEat + deptSkip)) * 100).toFixed(0) : 0}%`
             ]);
@@ -339,7 +409,7 @@ export async function GET(request: NextRequest) {
         }
 
         ws2.columns = [
-            { width: 6 }, { width: 25 }, { width: 20 }, { width: 15 }, { width: 22 }, { width: 25 }
+            { width: 6 }, { width: 25 }, { width: 20 }, { width: 25 }, { width: 15 }, { width: 22 }, { width: 25 }
         ];
 
         // ══════════════════════════════════

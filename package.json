@@ -13,9 +13,7 @@
     "test:e2e:ui": "npx playwright test --ui",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "mcp": "node mcp-server/dist/index.js",
-    "mcp:dev": "tsx mcp-server/src/index.ts"
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
