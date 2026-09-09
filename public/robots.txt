@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /dashboard/
+Disallow: /platform/
+Disallow: /auth/
+Disallow: /billing/
+
+Sitemap: https://comngon.io.vn/sitemap.xml
